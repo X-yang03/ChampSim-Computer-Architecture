@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ "$#" -ne 1 ]; then
+if [ "$#" -ne 4 ]; then
     echo "Illegal number of parameters"
     #echo "Usage: ./build_champsim.sh [branch_pred] [l1d_pref] [l2c_pref] [llc_pref] [llc_repl] [num_core]"
     echo "Usage: ./build_champsim.sh [l2c_pref]"
@@ -8,12 +8,12 @@ if [ "$#" -ne 1 ]; then
 fi
 
 # ChampSim configuration
-#BRANCH=$1           # branch/*.bpred
-#L1D_PREFETCHER=$1   # prefetcher/*.l1d_pref
-L2C_PREFETCHER=$1   # prefetcher/*.l2c_pref
-#LLC_PREFETCHER=$3   # prefetcher/*.llc_pref
-#LLC_REPLACEMENT=$5  # replacement/*.llc_repl
-#NUM_CORE=$6         # tested up to 8-core system
+BRANCH=perceptron          # branch/*.bpred
+L1D_PREFETCHER=$1   # prefetcher/*.l1d_pref
+L2C_PREFETCHER=$2   # prefetcher/*.l2c_pref
+LLC_PREFETCHER=$3   # prefetcher/*.llc_pref
+LLC_REPLACEMENT=$4  # replacement/*.llc_repl
+NUM_CORE=1         # tested up to 8-core system
 
 ############## Some useful macros ###############
 BOLD=$(tput bold)
@@ -21,11 +21,11 @@ NORMAL=$(tput sgr0)
 #################################################
 
 ############## Default configuration ############
-BRANCH=perceptron
-L1D_PREFETCHER=no
-LLC_PREFETCHER=no
-LLC_REPLACEMENT=lru
-NUM_CORE=1
+# BRANCH=perceptron
+# L1D_PREFETCHER=no
+# LLC_PREFETCHER=next_line
+# LLC_REPLACEMENT=lru
+# NUM_CORE=1
 #################################################
 
 # Sanity check
