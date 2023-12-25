@@ -1,5 +1,5 @@
 #!/bin/bash
-l3_pre=(ip_stride next_line no)
+l3_pre=(next_line no)
 l2_pre=(ip_stride next_line no)
 l1_pre=(next_line no)
 
@@ -26,7 +26,7 @@ do
                 do
                     ./build_champsim.sh ${l1} ${l2} ${l3} ${rep}
                     bin_name="bin/perceptron-${l1}-${l2}-${l3}-${rep}-1core"
-                    log_name="res/${trace_index}-${l1}-${l2}-${l3}-${rep}.log"
+                    log_name="res_459/${trace_index}-${l1}-${l2}-${l3}-${rep}.log"
                     ./run_champsim.sh ${bin_name} 100 100 ${trace} > ${log_name}
                     echo "Trace ${trace_index}-${l1}-${l2}-${l3}-${rep} done!"
                 done
