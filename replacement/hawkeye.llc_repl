@@ -224,7 +224,6 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
     addr_history[sampler_set][sampler_tag].update(perset_mytimer[set], ip,
                                                   new_prediction);
     addr_history[sampler_set][sampler_tag].lru = 0;
-    // Increment the set timer
     perset_mytimer[set] = (perset_mytimer[set] + 1) % TIMER_SIZE;
   }
 
