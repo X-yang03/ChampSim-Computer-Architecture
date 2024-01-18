@@ -18,20 +18,13 @@ struct rrpv_structure {
 
 struct rrpv_structure rrpv_str[LLC_WAY];
 
-// Per-set timers; we only use 64 of these
-// Budget = 64 sets * 1 timer per set * 10 bits per timer = 80 bytes
 #define TIMER_SIZE 1024
 uint64_t perset_mytimer[LLC_SET];
 
-// Signatures for sampled sets; we only use 64 of these
-// Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
 uint64_t signatures[LLC_SET][LLC_WAY];
 
 bool prefetched[LLC_SET][LLC_WAY];
 
-// Hawkeye Predictors for demand and prefetch requests
-// Predictor with 2K entries and 5-bit counter per entry
-// Budget = 2048*5/8 bytes = 1.2KB
 #define MAX_SHCT 31
 #define SHCT_SIZE_BITS 11
 #define SHCT_SIZE (1 << SHCT_SIZE_BITS)
@@ -153,8 +146,6 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
           demand_predictor->increment(
               addr_history[sampler_set][sampler_tag].PC);
       } else {
-        // Train the predictor negatively because OPT would not have cached this
-        // line
         if (addr_history[sampler_set][sampler_tag].prefetched)
           prefetch_predictor->decrement(
               addr_history[sampler_set][sampler_tag].PC);
@@ -167,7 +158,6 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
       update_addr_history_lru(sampler_set,
                               addr_history[sampler_set][sampler_tag].lru);
 
-      // Since this was a demand access, mark the prefetched bit as false
       addr_history[sampler_set][sampler_tag].prefetched = false;
     }
     // This is the first time we are seeing this line (could be demand or
@@ -209,7 +199,6 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
         }
       }
 
-      // Mark the prefetched bit
       addr_history[sampler_set][sampler_tag].mark_prefetch();
       // Some maintenance operations for OPTgen
       perset_optgen[set].add_prefetch(curr_quanta);
