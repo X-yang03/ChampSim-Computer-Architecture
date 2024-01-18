@@ -19,16 +19,16 @@
 
 class IP_TABLE_L1 {
   public:
-    uint64_t ip_tag;
-    uint64_t last_page;                                     // last page seen by IP
-    uint64_t last_cl_offset;                                // last cl offset in the 4KB page
-    int64_t last_stride;                                    // last delta observed
-    uint16_t ip_valid;                                      // Valid IP or not   
-    int conf;                                               // CS conf
-    uint16_t signature;                                     // CPLX signature
-    uint16_t str_dir;                                       // stream direction
-    uint16_t str_valid;                                     // stream valid
-    uint16_t str_strength;                                  // stream strength
+    uint64_t ip_tag;                 //IP标签
+    uint64_t last_page;             // 上一个页面IP
+    uint64_t last_cl_offset;           // 上一个缓存行偏移        
+    int64_t last_stride;               // 上一个步幅         
+    uint16_t ip_valid;                                      
+    int conf;                                               // CS 置信度
+    uint16_t signature;                                    
+    uint16_t str_dir;                                       
+    uint16_t str_valid;                                     
+    uint16_t str_strength;                                  
 
     IP_TABLE_L1 () {
         ip_tag = 0;
