@@ -1,0 +1,292 @@
+// Hawkeye Cache
+
+#include "cache.h"
+#include <map>
+
+#define MAX_LLC_SETS LLC_SET
+#define NUM_CORE NUM_CPUS
+#define maxRRPV 7
+
+// 3-bit RRIP counters or all lines
+uint32_t rrpv[LLC_SET][LLC_WAY];
+
+struct rrpv_structure {
+  int way;
+  int rrpv_val;
+  bool flag;
+};
+
+struct rrpv_structure rrpv_str[LLC_WAY];
+
+// Per-set timers; we only use 64 of these
+// Budget = 64 sets * 1 timer per set * 10 bits per timer = 80 bytes
+#define TIMER_SIZE 1024
+uint64_t perset_mytimer[LLC_SET];
+
+// Signatures for sampled sets; we only use 64 of these
+// Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
+uint64_t signatures[LLC_SET][LLC_WAY];
+
+bool prefetched[LLC_SET][LLC_WAY];
+
+// Hawkeye Predictors for demand and prefetch requests
+// Predictor with 2K entries and 5-bit counter per entry
+// Budget = 2048*5/8 bytes = 1.2KB
+#define MAX_SHCT 31
+#define SHCT_SIZE_BITS 11
+#define SHCT_SIZE (1 << SHCT_SIZE_BITS)
+#define OPTGEN_VECTOR_SIZE 128
+
+#include "hawkeye_predictor.h"
+HAWKEYE_PC_PREDICTOR *demand_predictor;   // 需求预测器
+HAWKEYE_PC_PREDICTOR *prefetch_predictor; // 预取预测器
+
+OPTgen perset_optgen[LLC_SET]; // 每个集合的占用向量；
+
+#include <math.h>
+
+// 位掩码函数，用于获取低位的 l 位
+#define bitmask(l) (((l) == 64) ? (unsigned long long)(-1LL) : ((1LL << (l)) - 1LL))
+// 位提取函数，用于获取 x 中从第 i 位开始的连续 l 位
+#define bits(x, i, l) (((x) >> (i)) & bitmask(l))
+
+// 对每个核采样64个集合
+#define SAMPLED_SET(set) (bits(set, 0, 6) == bits(set, ((unsigned long long)log2(LLC_SET) - 6), 6))
+
+// 采样器，用于追踪采样集的8倍缓存历史
+// 2800个条目 * 每个条目4字节 = 11.2KB
+#define SAMPLED_CACHE_SIZE 2800
+#define SAMPLER_WAYS 8
+#define SAMPLER_SETS SAMPLED_CACHE_SIZE / SAMPLER_WAYS
+
+std::vector<std::map<uint64_t, ADDR_INFO>> addr_history; // 采样器
+
+// 初始化状态
+void CACHE::llc_initialize_replacement() {
+  std::cout << "Initialize HawkEye state" << std::endl;
+
+  for (int i = 0; i < LLC_SET; i++) {
+    for (int j = 0; j < LLC_WAY; j++) {
+      rrpv[i][j] = maxRRPV;
+      signatures[i][j] = 0;
+      prefetched[i][j] = false;
+    }
+    perset_mytimer[i] = 0;
+    perset_optgen[i].init(LLC_WAY - 2);
+  }
+
+  addr_history.resize(SAMPLER_SETS);
+  for (int i = 0; i < SAMPLER_SETS; i++)
+    addr_history[i].clear();
+
+  demand_predictor = new HAWKEYE_PC_PREDICTOR();
+  prefetch_predictor = new HAWKEYE_PC_PREDICTOR();
+}
+
+// 替换元素
+void replace_addr_history_element(unsigned int sampler_set) {
+  uint64_t lru_addr = 0;
+  for (std::map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin();
+       it != addr_history[sampler_set].end(); it++) {
+    if ((it->second).lru == (SAMPLER_WAYS - 1)) {
+      lru_addr = it->first;
+      break;
+    }
+  }
+  addr_history[sampler_set].erase(lru_addr);
+}
+
+// 更新LRU
+void update_addr_history_lru(unsigned int sampler_set, unsigned int curr_lru) {
+  for (std::map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin();
+       it != addr_history[sampler_set].end(); it++) {
+    if ((it->second).lru < curr_lru) {
+      (it->second).lru++;
+      assert((it->second).lru < SAMPLER_WAYS);
+    }
+  }
+}
+
+// 在每个缓存命中和缓存填充时调用
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way,
+                                          uint64_t full_addr, uint64_t ip, uint64_t victim_addr,
+                                          uint32_t type, uint8_t hit) {
+  full_addr = (full_addr >> 6) << 6;
+
+  if (type == PREFETCH) {
+    if (!hit)
+      prefetched[set][way] = true;
+  } else
+    prefetched[set][way] = false;
+
+  // 忽略写回
+  if (type == WRITEBACK)
+    return;
+
+  // 如果正在采样，OPTgen只会看到来自采样集的访问
+  if (SAMPLED_SET(set)) {
+    // 当前时间步
+    uint64_t curr_quanta = perset_mytimer[set] % OPTGEN_VECTOR_SIZE;
+    uint32_t sampler_set = (full_addr >> 6) % SAMPLER_SETS;
+    uint64_t sampler_tag = CRC(full_addr >> 12) % 256;
+    assert(sampler_set < SAMPLER_SETS);
+
+    if ((addr_history[sampler_set].find(sampler_tag) !=
+         addr_history[sampler_set].end()) &&
+        (type != PREFETCH)) {
+      unsigned int curr_timer = perset_mytimer[set];
+      if (curr_timer < addr_history[sampler_set][sampler_tag].last_quanta)
+        curr_timer = curr_timer + TIMER_SIZE;
+      bool wrap =
+          ((curr_timer - addr_history[sampler_set][sampler_tag].last_quanta) >
+           OPTGEN_VECTOR_SIZE);
+      uint64_t last_quanta =
+          addr_history[sampler_set][sampler_tag].last_quanta %
+          OPTGEN_VECTOR_SIZE;
+
+      if (!wrap &&
+          perset_optgen[set].should_cache(curr_quanta, last_quanta)) {
+        if (addr_history[sampler_set][sampler_tag].prefetched)
+          prefetch_predictor->increment(
+              addr_history[sampler_set][sampler_tag].PC);
+        else
+          demand_predictor->increment(
+              addr_history[sampler_set][sampler_tag].PC);
+      } else {
+        // Train the predictor negatively because OPT would not have cached this
+        // line
+        if (addr_history[sampler_set][sampler_tag].prefetched)
+          prefetch_predictor->decrement(
+              addr_history[sampler_set][sampler_tag].PC);
+        else
+          demand_predictor->decrement(
+              addr_history[sampler_set][sampler_tag].PC);
+      }
+      // Some maintenance operations for OPTgen
+      perset_optgen[set].add_access(curr_quanta);
+      update_addr_history_lru(sampler_set,
+                              addr_history[sampler_set][sampler_tag].lru);
+
+      // Since this was a demand access, mark the prefetched bit as false
+      addr_history[sampler_set][sampler_tag].prefetched = false;
+    }
+    // This is the first time we are seeing this line (could be demand or
+    // prefetch)
+    else if (addr_history[sampler_set].find(sampler_tag) ==
+             addr_history[sampler_set].end()) {
+      // Find a victim from the sampled cache if we are sampling
+      if (addr_history[sampler_set].size() == SAMPLER_WAYS)
+        replace_addr_history_element(sampler_set);
+
+      assert(addr_history[sampler_set].size() < SAMPLER_WAYS);
+      // Initialize a new entry in the sampler
+      addr_history[sampler_set][sampler_tag].init(curr_quanta);
+      // If it's a prefetch, mark the prefetched bit;
+      if (type == PREFETCH) {
+        addr_history[sampler_set][sampler_tag].mark_prefetch();
+        perset_optgen[set].add_prefetch(curr_quanta);
+      } else
+        perset_optgen[set].add_access(curr_quanta);
+      update_addr_history_lru(sampler_set, SAMPLER_WAYS - 1);
+    } else // This line is a prefetch
+    {
+      assert(addr_history[sampler_set].find(sampler_tag) !=
+             addr_history[sampler_set].end());
+      // if(hit && prefetched[set][way])
+      uint64_t last_quanta =
+          addr_history[sampler_set][sampler_tag].last_quanta %
+          OPTGEN_VECTOR_SIZE;
+      if (perset_mytimer[set] -
+              addr_history[sampler_set][sampler_tag].last_quanta <
+          5 * NUM_CORE) {
+        if (perset_optgen[set].should_cache(curr_quanta, last_quanta)) {
+          if (addr_history[sampler_set][sampler_tag].prefetched)
+            prefetch_predictor->increment(
+                addr_history[sampler_set][sampler_tag].PC);
+          else
+            demand_predictor->increment(
+                addr_history[sampler_set][sampler_tag].PC);
+        }
+      }
+
+      // Mark the prefetched bit
+      addr_history[sampler_set][sampler_tag].mark_prefetch();
+      // Some maintenance operations for OPTgen
+      perset_optgen[set].add_prefetch(curr_quanta);
+      update_addr_history_lru(sampler_set,
+                              addr_history[sampler_set][sampler_tag].lru);
+    }
+
+    // Get Hawkeye's prediction for this line
+    bool new_prediction = demand_predictor->get_prediction(ip);
+    if (type == PREFETCH)
+      new_prediction = prefetch_predictor->get_prediction(ip);
+    addr_history[sampler_set][sampler_tag].update(perset_mytimer[set], ip,
+                                                  new_prediction);
+    addr_history[sampler_set][sampler_tag].lru = 0;
+    // Increment the set timer
+    perset_mytimer[set] = (perset_mytimer[set] + 1) % TIMER_SIZE;
+  }
+
+  bool new_prediction = demand_predictor->get_prediction(ip);
+  if (type == PREFETCH)
+    new_prediction = prefetch_predictor->get_prediction(ip);
+
+  signatures[set][way] = ip;
+
+  if (!new_prediction)
+    rrpv[set][way] = maxRRPV;
+  else {
+    rrpv[set][way] = 0;
+    if (!hit) {
+      bool saturated = false;
+      for (uint32_t i = 0; i < LLC_WAY; i++)
+        if (rrpv[set][i] == maxRRPV - 1)
+          saturated = true;
+
+      // Age all the cache-friendly  lines
+      for (uint32_t i = 0; i < LLC_WAY; i++) {
+        if (!saturated && rrpv[set][i] < maxRRPV - 1)
+          rrpv[set][i]++;
+      }
+    }
+    rrpv[set][way] = 0;
+  }
+
+}
+
+void CACHE::llc_replacement_final_stats() {}
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set,
+                                const BLOCK *current_set, uint64_t ip,
+                                uint64_t full_addr, uint32_t type) {
+  // 遍历查找具有最大RRPV（Re-Reference Prediction Value）的行
+  for (uint32_t i = 0; i < LLC_WAY; i++)
+    if (rrpv[set][i] == maxRRPV)
+      return i;
+
+  uint32_t max_rrip = 0;
+  int32_t lru_victim = -1;
+
+  // 遍历查找具有最大RRPV值的行作为替换候选
+  for (uint32_t i = 0; i < LLC_WAY; i++) {
+    if (rrpv[set][i] >= max_rrip) {
+      max_rrip = rrpv[set][i];
+      lru_victim = i;
+    }
+  }
+
+  assert(lru_victim != -1);  // 确保找到了替换候选
+  // 在LRU（Least Recently Used）替换时，对预取行进行负向训练
+  if (SAMPLED_SET(set)) {
+    if (prefetched[set][lru_victim])
+      prefetch_predictor->decrement(signatures[set][lru_victim]);
+    else
+      demand_predictor->decrement(signatures[set][lru_victim]);
+  }
+
+  return lru_victim;  // 返回找到的替换候选行的索引
+
+  // 注意：理论上不应该到达这里，如果到达说明存在错误
+  assert(0);
+  return 0;
+}
