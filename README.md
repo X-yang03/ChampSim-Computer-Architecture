@@ -13,5 +13,6 @@ if : bash: ./test.sh: Permission denied
 chmod +x test.sh
 
 # Test Results
-所有测试结果存放于res文件夹下
+所有测试结果存放于res文件夹下, 分析结果存放于analysis文件夹下
+
 
